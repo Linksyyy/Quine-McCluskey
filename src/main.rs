@@ -4,10 +4,11 @@ use std::io;
 use std::process;
 
 #[derive(Debug, Clone)]
-struct Minterm {
+struct Term {
     name: String,
-    inputs: String,
+    binary: String,
     bit_size: usize,
+    coverage: Vec<String>,
 }
 
 fn main() {
@@ -55,10 +56,20 @@ fn main() {
             println!("Done!\n");
         }
     }
-    println!("Truth table:\n{truth_table}\n");
+
+    let mut table = Table::new();
+    table.set_header(vec!["input", "output"]);
+    for line in truth_table.lines() {
+        let line = line.split_whitespace();
+        table.add_row(vec![
+            line.clone().next().unwrap_or("").to_string(),
+            line.clone().nth(1).unwrap_or("").to_string(),
+        ]);
+    }
+    println!("Truth table:\n{table}\n");
 
     // (minterm name, inputs, number of bits 1)
-    let mut list: Vec<Minterm> = Vec::new();
+    let mut list: Vec<Term> = Vec::new();
 
     println!("Organizing data:");
     for (i, line) in truth_table.lines().enumerate() {
@@ -68,20 +79,21 @@ fn main() {
         {
             let minterm_name = format!("m({})", i);
 
-            list.push(Minterm {
-                name: minterm_name,
-                inputs: input_bits.to_string(),
+            list.push(Term {
+                name: minterm_name.clone(),
+                binary: input_bits.to_string(),
                 bit_size: input_bits.matches('1').count(),
+                coverage: vec![minterm_name],
             });
             if let Some(last) = list.last() {
-                println!("{} -> {} -> {}", last.name, last.inputs, last.bit_size);
+                println!("{} -> {} -> {}", last.name, last.binary, last.bit_size);
             }
         }
     }
     println!("\nSpliting into groups with 1 bit diff:");
 
     // (minterm name, input)
-    let mut groups: Vec<Vec<Minterm>> = Vec::new();
+    let mut groups: Vec<Vec<Term>> = Vec::new();
     for term in list.iter() {
         if term.bit_size >= groups.len() {
             groups.resize(term.bit_size + 1, Vec::new());
@@ -91,11 +103,18 @@ fn main() {
 
     for (i, group) in groups.iter().enumerate() {
         if !group.is_empty() {
-            println!("group {i}: {:?}", group.iter().cloned());
+            println!(
+                "group {i}: {:?}",
+                group
+                    .to_vec()
+                    .iter()
+                    .map(|el| el.binary.clone())
+                    .collect::<Vec<_>>()
+            );
         }
     }
     println!("\nComparing groups:");
-    let mut compared: Vec<(String, String, Minterm, Minterm)> = Vec::new();
+    let mut compared: Vec<Term> = Vec::new();
     for i in 0..groups.len() {
         if i >= groups.len() {
             break;
@@ -108,7 +127,7 @@ fn main() {
             for term_a in current.iter() {
                 for term_b in next.iter() {
                     let mut result = String::new();
-                    for (c_char, l_char) in term_a.inputs.chars().zip(term_b.inputs.chars()) {
+                    for (c_char, l_char) in term_a.binary.chars().zip(term_b.binary.chars()) {
                         if c_char == l_char {
                             result.push(l_char);
                         } else {
@@ -117,7 +136,14 @@ fn main() {
                     }
                     if !result.chars().all(|c| c == result.chars().next().unwrap()) {
                         acc += 1;
-                        compared.push((format!("T{acc}"), result, term_a.clone(), term_b.clone()));
+                        let mut coverage = term_a.coverage.clone();
+                        coverage.extend(term_b.coverage.iter().cloned());
+                        compared.push(Term {
+                            name: format!("T{acc}"),
+                            bit_size: result.matches('1').count(),
+                            binary: result,
+                            coverage,
+                        });
                     }
                 }
             }
@@ -128,44 +154,195 @@ fn main() {
     table.set_header(vec!["Combined term", "Binary", "Coverage"]);
     for term in compared.iter() {
         table.add_row(vec![
-            term.0.clone(),
-            term.1.clone(),
-            format!("{},{}", term.2.name, term.3.name),
+            term.name.clone(),
+            term.binary.clone(),
+            term.coverage.join(","),
         ]);
     }
     println!("{table}");
 
-    println!("\nSecond comparing flow:");
+    println!("\nSecond comparisson flow:");
 
-    let mut second_compared: Vec<(String, String)> = Vec::new();
+    let mut recompared: Vec<Term> = Vec::new();
+    let mut regrouped: Vec<Vec<&Term>> = Vec::new();
 
-    let mut acc = 0;
-    for (i, current) in compared.iter().enumerate() {
-        for next in compared.iter().skip(i + 1) {
-            let mut result = String::new();
-            for (c_char, l_char) in current.1.chars().zip(next.1.chars()) {
-                if c_char == l_char {
-                    result.push(l_char);
-                } else {
-                    result.push('-');
+    for term in &compared {
+        if term.bit_size >= regrouped.len() {
+            regrouped.resize(term.bit_size + 1, Vec::new());
+        }
+
+        regrouped[term.bit_size].push(term);
+    }
+
+    for i in 0..regrouped.len().saturating_sub(1) {
+        let current = &regrouped[i];
+        let next = &regrouped[i + 1];
+
+        for left in current {
+            for right in next {
+                let mut result = String::new();
+                let mut diff = 0;
+
+                for (a, b) in left.binary.chars().zip(right.binary.chars()) {
+                    if a == b {
+                        result.push(a);
+                    } else {
+                        diff += 1;
+                        result.push('-');
+                    }
                 }
-            }
-            println!(
-                "{} {} & {} {} -> {}",
-                current.1, current.0, next.1, next.0, result
-            );
-            if !result.chars().all(|c| c == result.chars().next().unwrap()) {
-                acc += 1;
-                second_compared.push((format!("S{acc}"), result));
+
+                println!(
+                    "{} {} & {} {} -> {} -> {} bits diff",
+                    left.binary, left.name, right.binary, right.name, result, diff
+                );
+                if diff == 1 {
+                    let mut coverage = vec![left.name.clone(), right.name.clone()];
+                    coverage.extend(left.coverage.iter().cloned());
+                    coverage.extend(right.coverage.iter().cloned());
+                    recompared.push(Term {
+                        name: format!("S{}", i + 1),
+                        bit_size: result.matches('1').count(),
+                        binary: result,
+                        coverage,
+                    });
+                }
             }
         }
     }
+    let mut covered = Vec::new();
+
+    for term in &recompared {
+        covered.extend(term.coverage.iter().cloned());
+    }
+
+    compared.retain(|term| !covered.contains(&term.name));
+
+    compared.extend(recompared);
 
     let mut table = Table::new();
-    table.set_header(vec!["Combined term", "binary", "Boolean exp", "Coverage"]);
-    for term in second_compared {
-        println!("{:?}", term);
+    table.set_header(vec!["Combined term", "Binary", "Coverage"]);
+    for term in compared.iter() {
+        let coverage_display = term
+            .coverage
+            .iter()
+            .filter(|name| name.starts_with("m("))
+            .cloned()
+            .collect::<Vec<_>>();
+        table.add_row(vec![
+            term.name.clone(),
+            term.binary.clone(),
+            coverage_display.join(","),
+        ]);
     }
+    println!("{table}");
+
+    let minterms = list
+        .iter()
+        .map(|term| term.name.clone())
+        .collect::<Vec<_>>();
+    let coverages = compared
+        .iter()
+        .map(|term| {
+            let mut coverage = term
+                .coverage
+                .iter()
+                .filter(|name| name.starts_with("m("))
+                .cloned()
+                .collect::<Vec<_>>();
+            coverage.sort();
+            coverage.dedup();
+            coverage
+        })
+        .collect::<Vec<_>>();
+
+    let mut remaining = minterms.clone();
+    let mut selected_indices: Vec<usize> = Vec::new();
+
+    loop {
+        let mut added = false;
+        let current_remaining = remaining.clone();
+        for minterm in current_remaining {
+            let mut covering = Vec::new();
+            for (idx, coverage) in coverages.iter().enumerate() {
+                if coverage.contains(&minterm) {
+                    covering.push(idx);
+                }
+            }
+            if covering.len() == 1 {
+                let idx = covering[0];
+                if !selected_indices.contains(&idx) {
+                    selected_indices.push(idx);
+                    added = true;
+                }
+            }
+        }
+
+        if !added {
+            break;
+        }
+
+        remaining = remaining
+            .into_iter()
+            .filter(|minterm| {
+                !selected_indices
+                    .iter()
+                    .any(|idx| coverages[*idx].contains(minterm))
+            })
+            .collect();
+
+        if remaining.is_empty() {
+            break;
+        }
+    }
+
+    while !remaining.is_empty() {
+        let mut best_idx: Option<usize> = None;
+        let mut best_count = 0;
+        for (idx, coverage) in coverages.iter().enumerate() {
+            if selected_indices.contains(&idx) {
+                continue;
+            }
+            let count = coverage
+                .iter()
+                .filter(|minterm| remaining.contains(minterm))
+                .count();
+            if count > best_count {
+                best_count = count;
+                best_idx = Some(idx);
+            }
+        }
+
+        let Some(idx) = best_idx else { break };
+        selected_indices.push(idx);
+        remaining = remaining
+            .into_iter()
+            .filter(|minterm| !coverages[idx].contains(minterm))
+            .collect();
+    }
+
+    let selected_terms = selected_indices
+        .into_iter()
+        .map(|idx| compared[idx].clone())
+        .collect::<Vec<_>>();
+
+    let alphabet = (b'A'..=b'Z').map(|c| c as char).collect::<Vec<_>>();
+
+    let mut expression = String::new();
+    for (i, term) in selected_terms.iter().enumerate() {
+        for (i, char) in term.binary.chars().enumerate() {
+            match char {
+                '-' => continue,
+                '0' => expression.push_str(&format!("~{}", alphabet[i])),
+                '1' => expression.push_str(&format!("{}", alphabet[i])),
+                _ => (),
+            }
+        }
+        if i != selected_terms.len().saturating_sub(1) {
+            expression.push_str(" + ");
+        }
+    }
+    println!("Final expression:\n{expression}");
 }
 
 fn select_path(path: &str) -> String {
