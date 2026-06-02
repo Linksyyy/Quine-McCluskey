@@ -11,20 +11,6 @@ struct Term {
     coverage: Vec<String>,
 }
 
-fn terms_signature(terms: &[Term]) -> Vec<(String, Vec<String>)> {
-    let mut signature = terms
-        .iter()
-        .map(|term| {
-            let mut coverage = term.coverage.clone();
-            coverage.sort();
-            coverage.dedup();
-            (term.binary.clone(), coverage)
-        })
-        .collect::<Vec<_>>();
-    signature.sort();
-    signature
-}
-
 fn main() {
     let selected_path = select_path("benchmark");
     let selected_file = &select_path(&selected_path);
@@ -106,7 +92,7 @@ fn main() {
     }
     println!("\nSpliting into groups with 1 bit diff:");
 
-    let mut compared = factor_terms(&list);
+    let mut compared = factor_terms(&list, None);
     if compared.is_empty() {
         compared = list.clone();
     }
@@ -120,37 +106,7 @@ fn main() {
             term.coverage.join(","),
         ]);
     }
-    println!("{table}");
-
-    let recompared: Vec<Term> = factor_terms(&compared);
-    if terms_signature(&recompared) != terms_signature(&compared) {
-        println!("\nSecond comparisson flow:");
-        let mut covered = Vec::new();
-
-        for term in &recompared {
-            covered.extend(term.coverage.iter().cloned());
-        }
-
-        compared.retain(|term| !covered.contains(&term.name));
-        compared.extend(recompared);
-
-        let mut table = Table::new();
-        table.set_header(vec!["Combined term", "Binary", "Coverage"]);
-        for term in compared.iter() {
-            let coverage_display = term
-                .coverage
-                .iter()
-                .filter(|name| name.starts_with("m("))
-                .cloned()
-                .collect::<Vec<_>>();
-            table.add_row(vec![
-                term.name.clone(),
-                term.binary.clone(),
-                coverage_display.join(","),
-            ]);
-        }
-        println!("{table}");
-    }
+    println!("\n{table}");
 
     let minterms = list
         .clone()
@@ -209,26 +165,37 @@ fn main() {
         }
     }
 
-    while !remaining.is_empty() {
-        let mut best_idx: Option<usize> = None;
-        let mut best_count = 0;
-        for (idx, coverage) in coverages.iter().enumerate() {
-            if selected_indices.contains(&idx) {
-                continue;
+    if !remaining.is_empty() {
+        let mut clauses: Vec<Vec<usize>> = Vec::new();
+        for minterm in &remaining {
+            let mut coverers = Vec::new();
+            for (idx, coverage) in coverages.iter().enumerate() {
+                if selected_indices.contains(&idx) {
+                    continue;
+                }
+                if coverage.contains(minterm) {
+                    coverers.push(idx);
+                }
             }
-            let count = coverage
-                .iter()
-                .filter(|minterm| remaining.contains(minterm))
-                .count();
-            if count > best_count {
-                best_count = count;
-                best_idx = Some(idx);
+            if coverers.is_empty() {
+                println!("ERROR: minterm {minterm} is not covered by any implicant");
+                process::exit(0);
             }
+            clauses.push(coverers);
         }
 
-        let Some(idx) = best_idx else { break };
-        selected_indices.push(idx);
-        remaining.retain(|minterm| !coverages[idx].contains(minterm));
+        let products = petrick(&clauses);
+        let implicant_costs = compared
+            .iter()
+            .map(|term| literal_count(&term.binary))
+            .collect::<Vec<_>>();
+        if let Some(best) = choose_best_product(products, &implicant_costs) {
+            for idx in best {
+                if !selected_indices.contains(&idx) {
+                    selected_indices.push(idx);
+                }
+            }
+        }
     }
 
     let selected_terms = selected_indices
@@ -257,7 +224,90 @@ fn main() {
     println!("Final expression:\n{expression}");
 }
 
-fn factor_terms(list: &[Term]) -> Vec<Term> {
+fn literal_count(binary: &str) -> usize {
+    binary.chars().filter(|char| *char != '-').count()
+}
+
+fn is_subset(smaller: &[usize], larger: &[usize]) -> bool {
+    if smaller.len() > larger.len() {
+        return false;
+    }
+    let mut idx = 0;
+    for value in larger {
+        if idx < smaller.len() && smaller[idx] == *value {
+            idx += 1;
+        }
+        if idx == smaller.len() {
+            return true;
+        }
+    }
+    idx == smaller.len()
+}
+
+fn minimize_products(mut products: Vec<Vec<usize>>) -> Vec<Vec<usize>> {
+    for product in products.iter_mut() {
+        product.sort_unstable();
+        product.dedup();
+    }
+    products.sort();
+    products.dedup();
+    products.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
+
+    let mut minimized: Vec<Vec<usize>> = Vec::new();
+    'outer: for product in products {
+        for existing in &minimized {
+            if is_subset(existing, &product) {
+                continue 'outer;
+            }
+        }
+        minimized.push(product);
+    }
+    minimized
+}
+
+fn petrick(clauses: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let mut products: Vec<Vec<usize>> = vec![Vec::new()];
+    for clause in clauses {
+        let mut next: Vec<Vec<usize>> = Vec::new();
+        for product in &products {
+            for &implicant in clause {
+                let mut new_product = product.clone();
+                if !new_product.contains(&implicant) {
+                    new_product.push(implicant);
+                }
+                next.push(new_product);
+            }
+        }
+        products = minimize_products(next);
+    }
+    products
+}
+
+fn choose_best_product(
+    products: Vec<Vec<usize>>,
+    implicant_costs: &[usize],
+) -> Option<Vec<usize>> {
+    let mut best_product: Option<Vec<usize>> = None;
+    let mut best_cost = (usize::MAX, usize::MAX);
+    for product in products {
+        let literal_total = product.iter().map(|idx| implicant_costs[*idx]).sum();
+        let cost = (product.len(), literal_total);
+        let is_better = match &best_product {
+            Some(current) => {
+                cost < best_cost || (cost == best_cost && product.as_slice() < current.as_slice())
+            }
+            None => true,
+        };
+        if is_better {
+            best_cost = cost;
+            best_product = Some(product);
+        }
+    }
+    best_product
+}
+
+fn factor_terms(list: &[Term], recursive_number: Option<u32>) -> Vec<Term> {
+    let recursive_iterator = recursive_number.unwrap_or(1);
     let mut groups: Vec<Vec<Term>> = Vec::new();
     for term in list.iter() {
         if term.bit_size >= groups.len() {
@@ -266,19 +316,23 @@ fn factor_terms(list: &[Term]) -> Vec<Term> {
         groups[term.bit_size].push(term.clone());
     }
 
-    for (i, group) in groups.iter().enumerate() {
-        if !group.is_empty() {
-            println!(
-                "group {i}: {:?}",
-                group
-                    .to_vec()
-                    .iter()
-                    .map(|el| el.binary.clone())
-                    .collect::<Vec<_>>()
-            );
+    let has_groups = groups.iter().any(|group| !group.is_empty());
+    if has_groups {
+        let mut table = Table::new();
+        table.set_header(vec!["Group", "Terms"]);
+        for (i, group) in groups.iter().enumerate() {
+            if group.is_empty() {
+                continue;
+            }
+            let terms = group
+                .iter()
+                .map(|el| el.binary.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            table.add_row(vec![i.to_string(), terms]);
         }
+        println!("\nIteration {recursive_iterator}:\n{table}");
     }
-    println!("\nComparing groups:");
     let mut compared: Vec<Term> = Vec::new();
     let mut combined_any = false;
     for i in 0..groups.len() {
@@ -324,7 +378,7 @@ fn factor_terms(list: &[Term]) -> Vec<Term> {
     }
 
     if combined_any {
-        factor_terms(&compared)
+        factor_terms(&compared, Some(recursive_iterator + 1))
     } else {
         list.to_vec()
     }
