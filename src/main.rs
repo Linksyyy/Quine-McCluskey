@@ -11,6 +11,20 @@ struct Term {
     coverage: Vec<String>,
 }
 
+fn terms_signature(terms: &[Term]) -> Vec<(String, Vec<String>)> {
+    let mut signature = terms
+        .iter()
+        .map(|term| {
+            let mut coverage = term.coverage.clone();
+            coverage.sort();
+            coverage.dedup();
+            (term.binary.clone(), coverage)
+        })
+        .collect::<Vec<_>>();
+    signature.sort();
+    signature
+}
+
 fn main() {
     let selected_path = select_path("benchmark");
     let selected_file = &select_path(&selected_path);
@@ -108,36 +122,35 @@ fn main() {
     }
     println!("{table}");
 
-    println!("\nSecond comparisson flow:");
-
     let recompared: Vec<Term> = factor_terms(&compared);
+    if terms_signature(&recompared) != terms_signature(&compared) {
+        println!("\nSecond comparisson flow:");
+        let mut covered = Vec::new();
 
-    let mut covered = Vec::new();
+        for term in &recompared {
+            covered.extend(term.coverage.iter().cloned());
+        }
 
-    for term in &recompared {
-        covered.extend(term.coverage.iter().cloned());
+        compared.retain(|term| !covered.contains(&term.name));
+        compared.extend(recompared);
+
+        let mut table = Table::new();
+        table.set_header(vec!["Combined term", "Binary", "Coverage"]);
+        for term in compared.iter() {
+            let coverage_display = term
+                .coverage
+                .iter()
+                .filter(|name| name.starts_with("m("))
+                .cloned()
+                .collect::<Vec<_>>();
+            table.add_row(vec![
+                term.name.clone(),
+                term.binary.clone(),
+                coverage_display.join(","),
+            ]);
+        }
+        println!("{table}");
     }
-
-    compared.retain(|term| !covered.contains(&term.name));
-
-    compared.extend(recompared);
-
-    let mut table = Table::new();
-    table.set_header(vec!["Combined term", "Binary", "Coverage"]);
-    for term in compared.iter() {
-        let coverage_display = term
-            .coverage
-            .iter()
-            .filter(|name| name.starts_with("m("))
-            .cloned()
-            .collect::<Vec<_>>();
-        table.add_row(vec![
-            term.name.clone(),
-            term.binary.clone(),
-            coverage_display.join(","),
-        ]);
-    }
-    println!("{table}");
 
     let minterms = list
         .clone()
