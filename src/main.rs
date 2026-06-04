@@ -203,9 +203,14 @@ fn main() {
         .map(|idx| compared[idx].clone())
         .collect::<Vec<_>>();
 
-    let variables = (0..input_amount)
-        .map(|idx| format!("x{}", idx + 1))
-        .collect::<Vec<_>>();
+    let variables: Vec<String> = match input_amount {
+        0..=26 => (b'A'..=b'Z')
+            .map(|c| (c as char).to_string())
+            .collect::<Vec<_>>(),
+        _ => (0..input_amount)
+            .map(|idx| format!("x{}", idx + 1))
+            .collect::<Vec<_>>(),
+    };
 
     let mut expression = String::new();
     for (i, term) in selected_terms.iter().enumerate() {
@@ -283,10 +288,7 @@ fn petrick(clauses: &[Vec<usize>]) -> Vec<Vec<usize>> {
     products
 }
 
-fn choose_best_product(
-    products: Vec<Vec<usize>>,
-    implicant_costs: &[usize],
-) -> Option<Vec<usize>> {
+fn choose_best_product(products: Vec<Vec<usize>>, implicant_costs: &[usize]) -> Option<Vec<usize>> {
     let mut best_product: Option<Vec<usize>> = None;
     let mut best_cost = (usize::MAX, usize::MAX);
     for product in products {
